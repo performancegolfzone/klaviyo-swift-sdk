@@ -49,7 +49,7 @@ struct KlaviyoState: Equatable, Codable {
     var apiKey: String?
     var identity: ProfileData
 
-    // Computed shims forwarding to `identity.*` so the rest of KlaviyoSwift compiles unchanged.
+    /// Computed shims forwarding to `identity.*` so the rest of KlaviyoSwift compiles unchanged.
     var email: String? {
         get { identity.email }
         set { identity.email = newValue }
@@ -71,6 +71,9 @@ struct KlaviyoState: Equatable, Codable {
     }
 
     var pushTokenData: PushTokenData?
+    var pushNotificationsEnabled = true
+    /// The host's current choice must take precedence over asynchronously loaded disk state.
+    var pushNotificationsEnabledOverride: Bool?
 
     // queueing related stuff
     var queue: [KlaviyoRequest]
@@ -87,6 +90,7 @@ struct KlaviyoState: Equatable, Codable {
         case identity
         case queue
         case pushTokenData
+        case pushNotificationsEnabled
     }
 
     /// Legacy coding keys for migrating state files written before identity was composed into `ProfileData`.
@@ -98,6 +102,8 @@ struct KlaviyoState: Equatable, Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
         pushTokenData = try container.decodeIfPresent(PushTokenData.self, forKey: .pushTokenData)
+        pushNotificationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .pushNotificationsEnabled)
+            ?? true
         queue = try container.decodeIfPresent([KlaviyoRequest].self, forKey: .queue) ?? []
 
         if let identity = try container.decodeIfPresent(ProfileData.self, forKey: .identity) {
@@ -150,8 +156,60 @@ struct KlaviyoState: Equatable, Codable {
     }
 
     mutating func enqueueRequest(request: KlaviyoRequest) {
+        if !pushNotificationsEnabled, case .registerPushToken = request.endpoint {
+            return
+        }
         evictOldestIfAtCapacity()
         queue.append(request)
+    }
+
+    /// Revocations remain queued until delivered; disabling must not depend on being online.
+    mutating func disablePushNotifications() {
+        pushNotificationsEnabled = false
+        var tokens = Set<String>()
+        if let token = pushTokenData?.pushToken {
+            tokens.insert(token)
+        }
+        for request in queue + requestsInFlight {
+            if case let .registerPushToken(_, payload) = request.endpoint {
+                tokens.insert(payload.data.attributes.token)
+            }
+        }
+        for request in pendingRequests {
+            switch request {
+            case let .pushToken(token, _), let .automaticPushToken(token, _): tokens.insert(token)
+            default: break
+            }
+        }
+        pushTokenData = nil
+        queue.removeAll {
+            if case .registerPushToken = $0.endpoint {
+                return true
+            }; return false
+        }
+        pendingRequests.removeAll {
+            switch $0 {
+            case .pushToken, .automaticPushToken: return true
+            default: return false
+            }
+        }
+        for token in tokens.sorted() {
+            enqueuePushTokenRevocation(token)
+        }
+    }
+
+    mutating func enqueuePushTokenRevocation(_ token: String) {
+        guard let apiKey = apiKey, let anonymousId = anonymousId else { return }
+        let alreadyQueued = (queue + requestsInFlight).contains {
+            if case let .unregisterPushToken(_, payload) = $0.endpoint {
+                return payload.data.attributes.token == token
+            }
+            return false
+        }
+        guard !alreadyQueued else { return }
+        enqueueRequest(request: buildUnregisterRequest(
+            apiKey: apiKey, anonymousId: anonymousId, pushToken: token
+        ))
     }
 
     /// Enqueues a high-priority request at the front of the queue (e.g. opened-push or
@@ -168,7 +226,8 @@ struct KlaviyoState: Equatable, Codable {
         guard queue.count >= StateManagementConstants.maxQueueSize else { return }
         let maxSize = StateManagementConstants.maxQueueSize
         environment.emitDeveloperWarning(
-            "Request queue at capacity (\(maxSize)); evicting oldest request(s) to make room.")
+            "Request queue at capacity (\(maxSize)); evicting oldest request(s) to make room."
+        )
         // Evict the oldest by wall-clock enqueue time. `min(by:)` returns the first minimal
         // element, so ties — and legacy `.distantPast` entries carried across an app upgrade —
         // break by front-most queue position (age order). A backwards clock correction (e.g. an

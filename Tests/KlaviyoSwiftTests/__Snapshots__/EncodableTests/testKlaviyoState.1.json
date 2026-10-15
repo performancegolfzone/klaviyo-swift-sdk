@@ -4,6 +4,7 @@
     "email" : "foo",
     "phoneNumber" : "foo"
   },
+  "pushNotificationsEnabled" : true,
   "pushTokenData" : {
     "deviceData" : {
       "app_build" : "1",

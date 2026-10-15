@@ -12,6 +12,8 @@
   - initalizationState: InitializationState.uninitialized
   - pendingProfile: Optional<Dictionary<ProfileKey, AnyEncodable>>.none
   - pendingRequests: 0 elements
+  - pushNotificationsEnabled: true
+  - pushNotificationsEnabledOverride: Optional<Bool>.none
   - pushTokenData: Optional<PushTokenData>.none
   - queue: 0 elements
   - requestsInFlight: 0 elements

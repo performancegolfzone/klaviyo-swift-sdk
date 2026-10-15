@@ -293,6 +293,23 @@ The consent types per channel include:
 
 ## Push Notifications
 
+### App-level push consent
+
+If your app has a push preference separate from iOS notification permission, apply it before
+initializing the SDK on every launch:
+
+```swift
+KlaviyoSDK()
+    .setPushNotificationsEnabled(appPushConsentIsGranted)
+    .initialize(with: "YOUR_KLAVIYO_PUBLIC_API_KEY")
+```
+
+Disabling push clears saved tokens, removes queued registrations, and queues token revocations
+for delivery, including a registration that completes after opt-out. Profile updates, events,
+and in-app messaging remain available. The choice is persisted; existing installations default
+to enabled until the host supplies a choice. To opt back in, enable push and supply the current
+APNs token with `set(pushToken:)`.
+
 ### Prerequisites
 
 * An apple developer [account](https://developer.apple.com/).

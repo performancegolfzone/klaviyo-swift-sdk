@@ -72,6 +72,7 @@ enum KlaviyoAction: Equatable {
 
     /// call this to sync the user's local push notification authorization setting with the user's profile on the Klaviyo back-end.
     case setPushEnablement(PushEnablement)
+    case setPushNotificationsEnabled(Bool)
 
     /// called when the user wants to reset the existing profile from state
     case resetProfile
@@ -137,7 +138,10 @@ enum KlaviyoAction: Equatable {
         case .enqueueAggregateEvent, .enqueueEvent, .enqueueProfile, .enqueueSubscription, .resetProfile, .resetStateAndDequeue, .setEmail, .setExternalId, .setPhoneNumber, .setProfileProperty, .setPushEnablement, .setPushToken:
             return true
 
-        case .cancelInFlightRequests, .completeInitialization, .deQueueCompletedResults, .flushQueue, .initialize, .networkConnectivityChanged, .requestFailed, .sendRequest, .setAutomaticPushToken, .start, .stop, .trackingLinkReceived, .trackingLinkResolutionFailed:
+        case .cancelInFlightRequests, .completeInitialization, .deQueueCompletedResults, .flushQueue,
+             .initialize, .networkConnectivityChanged, .requestFailed, .sendRequest, .setAutomaticPushToken,
+             .setPushNotificationsEnabled, .start, .stop, .trackingLinkReceived,
+             .trackingLinkResolutionFailed:
             return false
         }
     }
@@ -158,6 +162,14 @@ struct KlaviyoReducer: ReducerProtocol {
         }
 
         switch action {
+        case let .setPushNotificationsEnabled(enabled):
+            state.pushNotificationsEnabledOverride = enabled
+            state.pushNotificationsEnabled = enabled
+            if !enabled {
+                state.disablePushNotifications()
+            }
+            return .none
+
         case let .initialize(apiKey):
             if case .initialized = state.initalizationState {
                 guard apiKey != state.apiKey else {
@@ -203,10 +215,18 @@ struct KlaviyoReducer: ReducerProtocol {
             // For any requests that get added between initilizing and initilized.
             // Ex: when the app is invoked from a push notification after being killed from the app switcher.
             let pendingRequests = state.pendingRequests
+            if let enabled = state.pushNotificationsEnabledOverride {
+                initialState.pushNotificationsEnabled = enabled
+                initialState.pushNotificationsEnabledOverride = enabled
+            }
             initialState.queue += state.queue
 
             state = initialState
             state.initalizationState = .initialized
+
+            if !state.pushNotificationsEnabled {
+                state.disablePushNotifications()
+            }
 
             state.pendingRequests = []
 
@@ -263,10 +283,13 @@ struct KlaviyoReducer: ReducerProtocol {
             return .none
 
         case let .setAutomaticPushToken(pushToken, enablement):
+            guard state.pushNotificationsEnabled else { return .none }
             guard case .initialized = state.initalizationState else {
                 let replacement = KlaviyoState.PendingRequest.automaticPushToken(pushToken, enablement)
                 if let index = state.pendingRequests.firstIndex(where: {
-                    if case .automaticPushToken = $0 { return true }
+                    if case .automaticPushToken = $0 {
+                        return true
+                    }
                     return false
                 }) {
                     state.pendingRequests[index] = replacement
@@ -280,6 +303,7 @@ struct KlaviyoReducer: ReducerProtocol {
             }
 
         case let .setPushToken(pushToken, enablement):
+            guard state.pushNotificationsEnabled else { return .none }
             guard case .initialized = state.initalizationState, let apiKey = state.apiKey, let anonymousId = state.anonymousId else {
                 state.pendingRequests.append(.pushToken(pushToken, enablement))
                 return .none
@@ -376,7 +400,11 @@ struct KlaviyoReducer: ReducerProtocol {
             ])
 
         case let .deQueueCompletedResults(completedRequest):
-            if case let .registerPushToken(_, payload) = completedRequest.endpoint {
+            if case let .registerPushToken(_, payload) = completedRequest.endpoint,
+               !state.pushNotificationsEnabled {
+                // A request already sent before revocation can still complete afterwards.
+                state.enqueuePushTokenRevocation(payload.data.attributes.token)
+            } else if case let .registerPushToken(_, payload) = completedRequest.endpoint {
                 let requestData = payload.data.attributes
                 let enablement = PushEnablement(rawValue: requestData.enablementStatus) ?? .authorized
                 let backgroundStatus = PushBackground(rawValue: requestData.backgroundStatus) ?? .available
@@ -408,6 +436,10 @@ struct KlaviyoReducer: ReducerProtocol {
             guard let request = state.requestsInFlight.first else {
                 state.flushing = false
                 return .none
+            }
+            if !state.pushNotificationsEnabled, case .registerPushToken = request.endpoint {
+                // Leave the current transport alone; skip registrations that have not been sent yet.
+                return .task { .deQueueCompletedResults(request) }
             }
             let retryState = state.retryState
             var numAttempts = 1
@@ -517,7 +549,8 @@ struct KlaviyoReducer: ReducerProtocol {
                     time: event.time,
                     uniqueId: event.uniqueId,
                     pushToken: state.pushTokenData?.pushToken
-                ))
+                )
+            )
 
             let endpoint = KlaviyoEndpoint.createEvent(apiKey, payload)
             let request = KlaviyoRequest(endpoint: endpoint)

@@ -132,6 +132,16 @@ public struct KlaviyoSDK {
         dispatchOnMainThread(action: .enqueueProfile(profile))
     }
 
+    /// Controls push registration independently of profile, event, and in-app messaging features.
+    /// Call before initialization when the host app has its own push-consent setting.
+    /// Disabling clears saved tokens, removes queued registrations, and queues their revocation.
+    /// Re-enabling permits a new token to be supplied with `set(pushToken:)`.
+    @discardableResult
+    public func setPushNotificationsEnabled(_ enabled: Bool) -> KlaviyoSDK {
+        dispatchOnMainThread(action: .setPushNotificationsEnabled(enabled))
+        return self
+    }
+
     /// Clears all stored profile identifiers (e.g. email or phone) and starts a new tracked profile.
     /// NOTE: if a push token was registered to the current profile, Klaviyo will disassociate it
     /// from the current profile. Existing token data will be associated with a new anonymous profile.
